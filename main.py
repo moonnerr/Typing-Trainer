@@ -17,15 +17,15 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout()
         central_widget.setLayout(main_layout)
 
-        #боковая(левая) панель
+        # боковая(левая) панель
         sidebar = QWidget()
         sidebar.setLayout(QVBoxLayout())
 
-        #средняя панель(с текстом)
+        # средняя панель(с текстом)
         training_panel = QWidget()
         training_panel.setLayout(QVBoxLayout())
 
-        #боковая(правая) панель
+        # боковая(правая) панель
         stats_panel = QWidget()
         stats_panel.setLayout(QVBoxLayout())
 
@@ -33,7 +33,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(training_panel, 3)
         main_layout.addWidget(stats_panel, 1)
 
-        #кнопки боковой панели
+        # кнопки боковой панели
         button_training = QPushButton("Тренировка")
         sidebar.layout().addWidget(button_training)
         button_stats = QPushButton("Статистика")
