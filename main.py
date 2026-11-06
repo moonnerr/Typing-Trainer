@@ -11,18 +11,21 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.initUI()
 
-    def initUI(self):
-        self.setWindowTitle("TypingTrainer")
-
-        # Подключение к базе данных
-        connection = sqlite3.connect("database/texts.db")
+    def load_text(self, level):
+        connection = sqlite3.connect("typing_trainer.db")
         cursor = connection.cursor()
 
-        # Получение и сохранение одной строки из таблицы
-        cursor.execute("SELECT content FROM texts ORDER BY RANDOM() LIMIT 1")
+        cursor.execute("SELECT content FROM texts WHERE level = ? ORDER BY RANDOM() LIMIT 1",(level,))
+
         result = cursor.fetchone()
+
+        self.result = result[0]
+        self.text_label.setText(self.result)
+
         connection.close()
-        # в дальнейшем надо будет подключить кнопки сложности, то есть по нажатию кнопки определённой сложности из базы данных будет браться рандомный текст нужной сложности
+
+    def initUI(self):
+        self.setWindowTitle("TypingTrainer")
 
         # ==================================================
         # ОБЩАЯ СТРУКТУРА ОКНА
@@ -88,9 +91,17 @@ class MainWindow(QMainWindow):
         sidebar.layout().addWidget(button_medium)
         sidebar.layout().addWidget(button_hard)
 
+        # Подключение кнопок к выбору сложности
+        button_light.clicked.connect(lambda: self.load_text("light"))
+        button_medium.clicked.connect(lambda: self.load_text("medium"))
+        button_hard.clicked.connect(lambda: self.load_text("hard"))
+
         # ==================================================
         # СРЕДНЯЯ ПАНЕЛЬ — ТРЕНИРОВКА
         # ==================================================
+
+        self.text_label = QLabel()
+        training_panel.layout().addWidget(self.text_label)
 
         # Здесь будут:
         # Таймер
@@ -106,6 +117,8 @@ class MainWindow(QMainWindow):
         # Результаты текущей тренировки
         # График прогресса
         # Дополнительная статистика
+
+        self.load_text("light")
 
 
 if __name__ == '__main__':
