@@ -1,17 +1,38 @@
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
-    QHBoxLayout, QLabel, QTextBrowser, QMainWindow, QLineEdit
+    QHBoxLayout, QLabel, QTextBrowser, QMainWindow
 )
 import sqlite3
+from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
+import time
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        self.current_index = 0 # номер символа в строке
+
+        self.last_input_correct = None
+
+        # блок для подсчёта времени
+        self.start_time = None # время начала тренировки
+        self.elapsed_time = 0 # прошедшее время
+        self.timer = QTimer() # сам таймер
+        self.timer.timeout.connect(self.update_timer)
+
         self.initUI()
 
     def load_text(self, level):
+        self.timer.stop() # останавливаем таймер
+        self.start_time = None # новая тренировка ещё не началась
+        self.elapsed_time = 0 # обнуляет прошедшее время
+        self.time_label.setText("Время: 00:00") # обновляет надпись времени на экране
+        self.accuracy_label.setText("Точность: 100,0%") # обновляет надпись точности на экране
+
+
         connection = sqlite3.connect("typing_trainer.db")
         cursor = connection.cursor()
 
@@ -19,13 +40,88 @@ class MainWindow(QMainWindow):
 
         result = cursor.fetchone()
 
-        self.result = result[0]
-        self.text_label.setText(self.result)
+        self.accuracy = 100.0  # точность печати на старте
+        self.errors = 0 # количество ошибок
+        self.result = result[0] # строка, которую нужно напечатать
+        self.current_index = 0 # текущий номер символа
+        self.last_input_correct = None
+        self.update_text()
 
         connection.close()
 
+        self.setFocus() # переключаем клавиатурный фокус на главное окно
+
+    # проверка правильности ввода
+    def keyPressEvent(self, event):
+        if self.current_index >= len(self.result):
+            return
+
+        current_symbol = self.result[self.current_index]
+        pressed_symbol = event.text()
+
+        if not pressed_symbol: # если клавиша не вводит символ, то нажатие не считается ошибочным
+            return
+
+        # счёт времени
+        if self.start_time is None: # проверяем, запускался ли таймер раньше
+            self.start_time = time.monotonic() # получаем текущее время
+            self.timer.start(100) # запускаем таймер с интервалом в 100 миллисекунд (0.1 секунду)
+
+        if pressed_symbol == current_symbol:
+            self.current_index += 1
+            self.last_input_correct = True
+        else:
+            self.last_input_correct = False
+            self.errors += 1
+
+        self.accuracy = self.current_index / (self.current_index + self.errors) * 100
+        self.accuracy_label.setText(f"Точность: {self.accuracy:.1f}%")
+
+        self.update_text()
+
+    # смена цвета символа
+    def update_text(self):
+        html = ""
+
+        for i, symbol in enumerate(self.result): # перебор текста с получением символа и номера
+            if i < self.current_index: # проверка правильности ввода
+                color = "green"
+
+            elif i == self.current_index: # если символ - текущий, то он белый
+                color = "white"
+
+                if self.last_input_correct == False:
+                    frame_color = "red"
+                else:
+                    frame_color = "green"
+
+            else:
+                color = "black"
+
+            # Добавляем символ с нужным цветом
+            if i == self.current_index: # проверяем, что символ текущий
+                html += f'<span style="color: {color}; background-color: {frame_color}; padding: 4px; border-radius: 5px;">{symbol}</span>' # задаём каждому символу своё оформление
+            else:
+                html += f'<span style="color: {color};">{symbol}</span>'
+
+        self.text_label.setHtml(html)
+
+    #
+    def update_timer(self):
+        self.elapsed_time = int(time.monotonic() - self.start_time)
+
+        print(self.elapsed_time)
+
+        minutes = self.elapsed_time // 60
+        seconds = self.elapsed_time % 60
+
+        self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}")
+
     def initUI(self):
         self.setWindowTitle("TypingTrainer")
+
+        # разрешаем окну получать фокус клавиатуры
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # ==================================================
         # ОБЩАЯ СТРУКТУРА ОКНА
@@ -54,9 +150,10 @@ class MainWindow(QMainWindow):
         stats_panel.setLayout(QVBoxLayout())
 
         # Добавление панелей в главное окно
-        main_layout.addWidget(sidebar, 1)
-        main_layout.addWidget(training_panel, 3)
-        main_layout.addWidget(stats_panel, 1)
+        main_layout.addWidget(sidebar, 2)
+        main_layout.addWidget(training_panel, 6)
+        main_layout.addWidget(stats_panel, 2)
+
 
         # ==================================================
         # ЛЕВАЯ ПАНЕЛЬ — НАВИГАЦИЯ И СЛОЖНОСТЬ
@@ -100,8 +197,12 @@ class MainWindow(QMainWindow):
         # СРЕДНЯЯ ПАНЕЛЬ — ТРЕНИРОВКА
         # ==================================================
 
-        self.text_label = QLabel()
+        # поле с текстом
+        self.text_label = QTextBrowser()
+        self.text_label.setReadOnly(True)
+        self.text_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         training_panel.layout().addWidget(self.text_label)
+
 
         # Здесь будут:
         # Таймер
@@ -112,6 +213,12 @@ class MainWindow(QMainWindow):
         # ==================================================
         # ПРАВАЯ ПАНЕЛЬ — СТАТИСТИКА
         # ==================================================
+
+        self.accuracy_label = QLabel("Точность: 100,0%")
+        stats_panel.layout().addWidget(self.accuracy_label)
+
+        self.time_label = QLabel("Время: 00:00")
+        stats_panel.layout().addWidget(self.time_label)
 
         # Здесь будут:
         # Результаты текущей тренировки
