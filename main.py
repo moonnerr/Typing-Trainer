@@ -110,8 +110,6 @@ class MainWindow(QMainWindow):
     def update_timer(self):
         self.elapsed_time = int(time.monotonic() - self.start_time)
 
-        print(self.elapsed_time)
-
         minutes = self.elapsed_time // 60
         seconds = self.elapsed_time % 60
 
