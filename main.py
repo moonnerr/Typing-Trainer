@@ -4,9 +4,10 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QTextBrowser, QMainWindow
 )
 import sqlite3
-from PyQt6.QtCore import Qt
 from PyQt6.QtCore import Qt, QTimer
 import time
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 
 class MainWindow(QMainWindow):
@@ -106,14 +107,22 @@ class MainWindow(QMainWindow):
 
         self.text_label.setHtml(html)
 
-    #
-    def update_timer(self):
-        self.elapsed_time = int(time.monotonic() - self.start_time)
+    # счётчик времени
+    def update_timer(self): # обновляем таймер
+        self.elapsed_time = int(time.monotonic() - self.start_time) # считаем, сколько ЦЕЛЫХ секунд прошло с начала тренировки
 
-        minutes = self.elapsed_time // 60
-        seconds = self.elapsed_time % 60
+        elapsed_seconds = time.monotonic() - self.start_time # считаем, сколько секунд прошло с начала тренировки (не обязательно целых)
 
-        self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}")
+        if elapsed_seconds > 0: # если количество напечатанных символов больше 0
+            self.cpm = self.current_index / elapsed_seconds * 60 # считаем скорость печати в символах в минуту
+        else: # если количество напечатанных символов = 0
+            self.cpm = 0 # тогда скорость печати = 0
+
+        minutes = self.elapsed_time // 60 # сколько минут прошло
+        seconds = self.elapsed_time % 60 # сколько секунд осталось после выделения минут
+
+        self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
+        self.speed_label.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
 
     def initUI(self):
         self.setWindowTitle("TypingTrainer")
@@ -195,18 +204,15 @@ class MainWindow(QMainWindow):
         # СРЕДНЯЯ ПАНЕЛЬ — ТРЕНИРОВКА
         # ==================================================
 
-        # поле с текстом
+        # Текст для набора
         self.text_label = QTextBrowser()
         self.text_label.setReadOnly(True)
         self.text_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         training_panel.layout().addWidget(self.text_label)
 
-
-        # Здесь будут:
-        # Таймер
         # Скорость печати
-        # Текст для набора
-        # Поле ввода
+        self.speed_label = QLabel("Скорость: 0 симв./мин")
+        stats_panel.layout().addWidget(self.speed_label)
 
         # ==================================================
         # ПРАВАЯ ПАНЕЛЬ — СТАТИСТИКА
