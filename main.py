@@ -9,6 +9,8 @@ import time
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from styles import LIGHT_THEME, DARK_THEME, get_stylesheet
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -24,9 +26,33 @@ class MainWindow(QMainWindow):
         self.timer = QTimer() # сам таймер
         self.timer.timeout.connect(self.update_timer)
 
+        self.settings = self.load_settings()
+
+        self.current_theme = (
+            LIGHT_THEME if self.settings["theme"] == "light" else DARK_THEME
+        )
+
+        self.text_font_size = self.settings["font_size"]
+
         self.initUI()
 
+    # сохранение пользовательских настроек
+    def load_settings(self):
+        connection = sqlite3.connect("typing_trainer.db")
+        cursor = connection.cursor()
+
+        cursor.execute("SELECT theme, font_size, interface_language, training_language FROM settings WHERE id = 1")
+
+        result = cursor.fetchone()
+        connection.close()
+
+        if result is None:
+            return {"theme": "light", "font_size": 20, "interface_language": "ru", "training_language": "ru"}
+
+        return {"theme": result[0], "font_size": result[1], "interface_language": result[2], "training_language": result[3]}
+
     def load_text(self, level):
+        self.level = level  # запоминаем текущую сложность
         self.timer.stop() # останавливаем таймер
         self.start_time = None # новая тренировка ещё не началась
         self.elapsed_time = 0 # обнуляет прошедшее время
@@ -37,7 +63,15 @@ class MainWindow(QMainWindow):
         connection = sqlite3.connect("typing_trainer.db")
         cursor = connection.cursor()
 
-        cursor.execute("SELECT content FROM texts WHERE level = ? ORDER BY RANDOM() LIMIT 1",(level,))
+        cursor.execute("SELECT MAX(training_number) FROM results")
+        last_number = cursor.fetchone()[0]
+
+        if last_number is None:
+            training_number = 1
+        else:
+            training_number = last_number + 1
+
+        cursor.execute("SELECT content FROM texts WHERE level = ? AND language = ? ORDER BY RANDOM() LIMIT 1", (level, self.settings["training_language"])) # выбираем рандомный текст из базы данных по языку и уровню
 
         result = cursor.fetchone()
 
@@ -80,16 +114,21 @@ class MainWindow(QMainWindow):
 
         self.update_text()
 
+        if self.current_index == len(self.result):
+            self.finish_training()
+
     # смена цвета символа
     def update_text(self):
         html = ""
 
-        for i, symbol in enumerate(self.result): # перебор текста с получением символа и номера
-            if i < self.current_index: # проверка правильности ввода
+        theme = self.current_theme
+
+        for i, symbol in enumerate(self.result):  # перебор текста с получением символа и номера
+            if i < self.current_index:  # проверка правильности ввода
                 color = "green"
 
-            elif i == self.current_index: # если символ - текущий, то он белый
-                color = "white"
+            elif i == self.current_index:  # если символ - текущий, то он белый
+                color = theme["text"]
 
                 if self.last_input_correct == False:
                     frame_color = "red"
@@ -97,11 +136,11 @@ class MainWindow(QMainWindow):
                     frame_color = "green"
 
             else:
-                color = "black"
+                color = theme["text"]
 
             # Добавляем символ с нужным цветом
-            if i == self.current_index: # проверяем, что символ текущий
-                html += f'<span style="color: {color}; background-color: {frame_color}; padding: 4px; border-radius: 5px;">{symbol}</span>' # задаём каждому символу своё оформление
+            if i == self.current_index:  # проверяем, что символ текущий
+                html += f'<span style="color: {color}; background-color: {frame_color}; padding: 4px; border-radius: 5px;">{symbol}</span>'  # задаём каждому символу своё оформление
             else:
                 html += f'<span style="color: {color};">{symbol}</span>'
 
@@ -124,7 +163,125 @@ class MainWindow(QMainWindow):
         self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
         self.speed_label.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
 
+    def update_graph(self):
+        # Подключаемся к базе данных
+        connection = sqlite3.connect("typing_trainer.db")
+        cursor = connection.cursor()
+
+        # Получаем номер тренировки и скорость печати
+        cursor.execute("""SELECT training_number, speed FROM results ORDER BY training_number""")
+
+        results = cursor.fetchall()
+        connection.close()
+
+        # Разделяем данные на два списка
+        trainings = [row[0] for row in results]
+        speeds = [row[1] for row in results]
+
+        # Очищаем график перед обновлением
+        self.ax.clear()
+
+        theme = self.current_theme
+
+        # Оформление графика для светлой темы
+        self.figure.set_facecolor(theme["panel"])
+        self.ax.set_facecolor(theme["panel"])
+
+        self.ax.plot(
+            trainings,
+            speeds,
+            color=theme["accent"], # цвет графика
+            linewidth=2.5, # толщина линии
+            marker="o", # форма точки
+            markersize=5 # толщина точки
+        )
+
+        self.ax.set_title("Мой прогресс", color=theme["text"])
+        self.ax.set_xlabel("Тренировки", color=theme["secondary_text"])
+        self.ax.set_ylabel("Скорость (симв./мин)", color=theme["secondary_text"])
+
+        self.ax.tick_params(colors=theme["secondary_text"])
+        self.ax.grid(color=theme["panel_border"], linestyle="--", alpha=0.8)
+
+        self.ax.spines["top"].set_visible(False)
+        self.ax.spines["right"].set_visible(False)
+        self.ax.spines["left"].set_color(theme["panel_border"])
+        self.ax.spines["bottom"].set_color(theme["panel_border"])
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def toggle_theme(self):
+        # Переключаем тему
+        if self.settings["theme"] == "light":
+            self.settings["theme"] = "dark"
+            self.current_theme = DARK_THEME
+            self.button_theme.setText("Светлая тема")
+        else:
+            self.settings["theme"] = "light"
+            self.current_theme = LIGHT_THEME
+            self.button_theme.setText("Тёмная тема")
+
+        # Применяем новое оформление
+        self.setStyleSheet(get_stylesheet(self.current_theme))
+
+        # Сохраняем выбранную тему в базе данных
+        connection = sqlite3.connect("typing_trainer.db")
+        cursor = connection.cursor()
+
+        cursor.execute(
+            "UPDATE settings SET theme = ? WHERE id = 1",
+            (self.settings["theme"],)
+        )
+
+        connection.commit()
+        connection.close()
+
+        # Обновляем график
+        self.update_graph()
+        # обновляем текст
+        self.update_text()
+
+    # сохранение результатов тренировки в базу данных
+    def finish_training(self):
+        self.timer.stop() # останавливаем таймер
+        elapsed_seconds = time.monotonic() - self.start_time # вычисляем, сколько секунд длилась тренировка
+        self.elapsed_time = int(elapsed_seconds) # сохраняем время тренировки в целых секундах
+
+        # рассчитываем итоговую скорость печати
+        if elapsed_seconds > 0:
+            self.cpm = self.current_index / elapsed_seconds * 60
+        else:
+            self.cpm = 0
+        minutes = self.elapsed_time // 60 # сколько минут прошло
+
+        seconds = self.elapsed_time % 60 # сколько секунд осталось после выделения минут
+
+        self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
+        self.speed_label.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
+
+        connection = sqlite3.connect("typing_trainer.db")
+        cursor = connection.cursor()
+
+        cursor.execute("SELECT MAX(training_number) FROM results")
+        last_number = cursor.fetchone()[0]
+
+        if last_number is None:
+            training_number = 1
+        else:
+            training_number = last_number + 1
+
+        cursor.execute("""INSERT INTO results (speed, accuracy, errors, duration, level, training_number) VALUES (?, ?, ?, ?, ?, ?)""",(self.cpm, self.accuracy, self.errors, self.elapsed_time, self.level, training_number))
+
+        connection.commit()  # подтверждаем и сохраняем изменения в базе данных
+        connection.close()  # закрываем соединение с базой данных
+
+        self.update_graph() # обновляем график
+
+
     def initUI(self):
+        self.setStyleSheet(get_stylesheet(self.current_theme)) # задаём тему
+
         self.setWindowTitle("TypingTrainer")
 
         # разрешаем окну получать фокус клавиатуры
@@ -161,6 +318,10 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(training_panel, 6)
         main_layout.addWidget(stats_panel, 2)
 
+        central_widget.setObjectName("mainContainer")
+        sidebar.setObjectName("sidebar")
+        training_panel.setObjectName("trainingPanel")
+        stats_panel.setObjectName("statsPanel")
 
         # ==================================================
         # ЛЕВАЯ ПАНЕЛЬ — НАВИГАЦИЯ И СЛОЖНОСТЬ
@@ -170,18 +331,16 @@ class MainWindow(QMainWindow):
         title_label = QLabel("TypingTrainer")
         sidebar.layout().addWidget(title_label)
 
-        # Кнопки навигации
-        button_training = QPushButton("Тренировка")
-        sidebar.layout().addWidget(button_training)
+        # кнопка смены темы
+        self.button_theme = QPushButton()
+        sidebar.layout().addWidget(self.button_theme)
 
-        button_stats = QPushButton("Статистика")
-        sidebar.layout().addWidget(button_stats)
+        if self.settings["theme"] == "dark":
+            self.button_theme.setText("Светлая тема")
+        else:
+            self.button_theme.setText("Тёмная тема")
 
-        button_settings = QPushButton("Настройки")
-        sidebar.layout().addWidget(button_settings)
-
-        button_about = QPushButton("О программе")
-        sidebar.layout().addWidget(button_about)
+        self.button_theme.clicked.connect(self.toggle_theme)
 
         # Выбор сложности
         difficulty_label = QLabel("Сложность")
@@ -224,10 +383,16 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel("Время: 00:00")
         stats_panel.layout().addWidget(self.time_label)
 
-        # Здесь будут:
-        # Результаты текущей тренировки
-        # График прогресса
-        # Дополнительная статистика
+        # блок для графика
+        self.figure = Figure()
+        self.figure.set_facecolor(self.current_theme["panel"])
+
+        self.ax = self.figure.add_subplot(111)
+
+        self.canvas = FigureCanvas(self.figure)
+        stats_panel.layout().addWidget(self.canvas)
+
+        self.update_graph()
 
         self.load_text("light")
 
