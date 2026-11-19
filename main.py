@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
-    QHBoxLayout, QLabel, QMainWindow, QSlider
+    QHBoxLayout, QLabel, QMainWindow, QSlider, QMessageBox
 )
 import sqlite3
 from PyQt6.QtCore import Qt, QTimer
@@ -9,9 +9,11 @@ import time
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
-
+from pathlib import Path
 from styles import LIGHT_THEME, DARK_THEME, get_stylesheet
 
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "typing_trainer.db"
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -43,7 +45,7 @@ class MainWindow(QMainWindow):
 
     # сохранение пользовательских настроек
     def load_settings(self):
-        connection = sqlite3.connect("typing_trainer.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
 
         cursor.execute("SELECT theme, font_size, interface_language, training_language FROM settings WHERE id = 1")
@@ -55,7 +57,6 @@ class MainWindow(QMainWindow):
             return {"theme": "light", "font_size": 20, "interface_language": "ru", "training_language": "ru"}
 
         return {"theme": result[0], "font_size": result[1], "interface_language": result[2], "training_language": result[3]}
-
 
     # загрузка нового текста для тренировки и подготовка программы к его набору
     def load_text(self, level):
@@ -72,17 +73,23 @@ class MainWindow(QMainWindow):
         self.paused_time = 0
         self.pause_button.setText("Пауза")
         self.pause_button.setEnabled(False)
+        self.next_button.setEnabled(False)
 
         self.cpm = 0
 
-        connection = sqlite3.connect("typing_trainer.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
-
-        cursor.execute("SELECT MAX(training_number) FROM results")
 
         cursor.execute("SELECT content FROM texts WHERE level = ? AND language = ? ORDER BY RANDOM() LIMIT 1", (level, self.settings["training_language"])) # выбираем рандомный текст из базы данных по языку и уровню
 
         result = cursor.fetchone()
+        connection.close()
+
+        if result is None:
+            self.result = ""
+            self.text_label.setText("Нет текстов для выбранного языка и сложности")
+            QMessageBox.warning(self, "Нет текстов", "Нет текстов для выбранного языка и сложности.")
+            return
 
         self.accuracy = 100.0  # точность печати на старте
         self.errors = 0 # количество ошибок
@@ -91,15 +98,13 @@ class MainWindow(QMainWindow):
         self.last_input_correct = None
         self.update_text()
 
-        connection.close()
-
         self.setFocus() # переключаем клавиатурный фокус на главное окно
 
     # смена языка тренировочного текста и сохранение выбранного языка в базе данных
     def change_language(self, language):
         self.settings["training_language"] = language
 
-        connection = sqlite3.connect("typing_trainer.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
 
         cursor.execute("UPDATE settings SET training_language = ? WHERE id = 1", (language,))
@@ -198,7 +203,7 @@ class MainWindow(QMainWindow):
     # обновление графика прогресса
     def update_graph(self):
         # Подключаемся к базе данных
-        connection = sqlite3.connect("typing_trainer.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
 
         # Получаем номер тренировки и скорость печати
@@ -261,7 +266,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(get_stylesheet(self.current_theme))
 
         # Сохраняем выбранную тему в базе данных
-        connection = sqlite3.connect("typing_trainer.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
 
         cursor.execute("UPDATE settings SET theme = ? WHERE id = 1", (self.settings["theme"],))
@@ -311,7 +316,7 @@ class MainWindow(QMainWindow):
         self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
         self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
 
-        connection = sqlite3.connect("typing_trainer.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
 
         cursor.execute("SELECT MAX(training_number) FROM results")
