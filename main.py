@@ -1,13 +1,14 @@
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
-    QHBoxLayout, QLabel, QTextBrowser, QMainWindow
+    QHBoxLayout, QLabel, QMainWindow, QSlider
 )
 import sqlite3
 from PyQt6.QtCore import Qt, QTimer
 import time
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 
 from styles import LIGHT_THEME, DARK_THEME, get_stylesheet
 
@@ -25,6 +26,10 @@ class MainWindow(QMainWindow):
         self.elapsed_time = 0 # прошедшее время
         self.timer = QTimer() # сам таймер
         self.timer.timeout.connect(self.update_timer)
+
+        self.is_paused = False
+        self.pause_started = None
+        self.paused_time = 0
 
         self.settings = self.load_settings()
 
@@ -51,25 +56,29 @@ class MainWindow(QMainWindow):
 
         return {"theme": result[0], "font_size": result[1], "interface_language": result[2], "training_language": result[3]}
 
+
+    # загрузка нового текста для тренировки и подготовка программы к его набору
     def load_text(self, level):
         self.level = level  # запоминаем текущую сложность
         self.timer.stop() # останавливаем таймер
         self.start_time = None # новая тренировка ещё не началась
         self.elapsed_time = 0 # обнуляет прошедшее время
-        self.time_label.setText("Время: 00:00") # обновляет надпись времени на экране
-        self.accuracy_label.setText("Точность: 100,0%") # обновляет надпись точности на экране
+        self.time_value.setText("00:00") # обновляет надпись времени на экране
+        self.accuracy_value.setText("100,0%") # обновляет надпись точности на экране
+        self.speed_value.setText("0") # обновляет надпись времени на экране
 
+        self.is_paused = False
+        self.pause_started = None
+        self.paused_time = 0
+        self.pause_button.setText("Пауза")
+        self.pause_button.setEnabled(False)
+
+        self.cpm = 0
 
         connection = sqlite3.connect("typing_trainer.db")
         cursor = connection.cursor()
 
         cursor.execute("SELECT MAX(training_number) FROM results")
-        last_number = cursor.fetchone()[0]
-
-        if last_number is None:
-            training_number = 1
-        else:
-            training_number = last_number + 1
 
         cursor.execute("SELECT content FROM texts WHERE level = ? AND language = ? ORDER BY RANDOM() LIMIT 1", (level, self.settings["training_language"])) # выбираем рандомный текст из базы данных по языку и уровню
 
@@ -86,8 +95,25 @@ class MainWindow(QMainWindow):
 
         self.setFocus() # переключаем клавиатурный фокус на главное окно
 
+    # смена языка тренировочного текста и сохранение выбранного языка в базе данных
+    def change_language(self, language):
+        self.settings["training_language"] = language
+
+        connection = sqlite3.connect("typing_trainer.db")
+        cursor = connection.cursor()
+
+        cursor.execute("UPDATE settings SET training_language = ? WHERE id = 1", (language,))
+
+        connection.commit()
+        connection.close()
+
+        self.load_text(self.level) # передаём сложность текста
+
     # проверка правильности ввода
     def keyPressEvent(self, event):
+        if self.is_paused:
+            return
+
         if self.current_index >= len(self.result):
             return
 
@@ -101,6 +127,7 @@ class MainWindow(QMainWindow):
         if self.start_time is None: # проверяем, запускался ли таймер раньше
             self.start_time = time.monotonic() # получаем текущее время
             self.timer.start(100) # запускаем таймер с интервалом в 100 миллисекунд (0.1 секунду)
+            self.pause_button.setEnabled(True)
 
         if pressed_symbol == current_symbol:
             self.current_index += 1
@@ -110,12 +137,18 @@ class MainWindow(QMainWindow):
             self.errors += 1
 
         self.accuracy = self.current_index / (self.current_index + self.errors) * 100
-        self.accuracy_label.setText(f"Точность: {self.accuracy:.1f}%")
+        self.accuracy_value.setText(f"{self.accuracy:.1f}%")
 
         self.update_text()
 
         if self.current_index == len(self.result):
             self.finish_training()
+
+    # изменение размера тренировочного текста на экране
+    def change_font_size(self, size):
+        self.text_font_size = size
+        self.text_size_label.setText(f"РАЗМЕР ТЕКСТА {size}")
+        self.text_label.setStyleSheet(f"font-size: {size}px;")
 
     # смена цвета символа
     def update_text(self):
@@ -143,14 +176,13 @@ class MainWindow(QMainWindow):
                 html += f'<span style="color: {color}; background-color: {frame_color}; padding: 4px; border-radius: 5px;">{symbol}</span>'  # задаём каждому символу своё оформление
             else:
                 html += f'<span style="color: {color};">{symbol}</span>'
-
-        self.text_label.setHtml(html)
+        self.text_label.setText(html)
 
     # счётчик времени
     def update_timer(self): # обновляем таймер
-        self.elapsed_time = int(time.monotonic() - self.start_time) # считаем, сколько ЦЕЛЫХ секунд прошло с начала тренировки
+        self.elapsed_time = int(time.monotonic() - self.start_time - self.paused_time) # считаем, сколько ЦЕЛЫХ секунд прошло с начала тренировки
 
-        elapsed_seconds = time.monotonic() - self.start_time # считаем, сколько секунд прошло с начала тренировки (не обязательно целых)
+        elapsed_seconds = time.monotonic() - self.start_time - self.paused_time # считаем, сколько секунд прошло с начала тренировки (не обязательно целых)
 
         if elapsed_seconds > 0: # если количество напечатанных символов больше 0
             self.cpm = self.current_index / elapsed_seconds * 60 # считаем скорость печати в символах в минуту
@@ -160,9 +192,10 @@ class MainWindow(QMainWindow):
         minutes = self.elapsed_time // 60 # сколько минут прошло
         seconds = self.elapsed_time % 60 # сколько секунд осталось после выделения минут
 
-        self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
-        self.speed_label.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
+        self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
+        self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
 
+    # обновление графика прогресса
     def update_graph(self):
         # Подключаемся к базе данных
         connection = sqlite3.connect("typing_trainer.db")
@@ -198,6 +231,7 @@ class MainWindow(QMainWindow):
 
         self.ax.set_title("Мой прогресс", color=theme["text"])
         self.ax.set_xlabel("Тренировки", color=theme["secondary_text"])
+        self.ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         self.ax.set_ylabel("Скорость (симв./мин)", color=theme["secondary_text"])
 
         self.ax.tick_params(colors=theme["secondary_text"])
@@ -211,6 +245,7 @@ class MainWindow(QMainWindow):
         self.figure.tight_layout()
         self.canvas.draw()
 
+    # переключение оформления программы между светлой и тёмной темами
     def toggle_theme(self):
         # Переключаем тему
         if self.settings["theme"] == "light":
@@ -229,10 +264,7 @@ class MainWindow(QMainWindow):
         connection = sqlite3.connect("typing_trainer.db")
         cursor = connection.cursor()
 
-        cursor.execute(
-            "UPDATE settings SET theme = ? WHERE id = 1",
-            (self.settings["theme"],)
-        )
+        cursor.execute("UPDATE settings SET theme = ? WHERE id = 1", (self.settings["theme"],))
 
         connection.commit()
         connection.close()
@@ -242,10 +274,29 @@ class MainWindow(QMainWindow):
         # обновляем текст
         self.update_text()
 
+    # приостановку тренировки и её продолжение
+    def toggle_pause(self):
+        if not self.is_paused:
+            self.is_paused = True
+            self.pause_started = time.monotonic()
+            self.timer.stop()
+            self.pause_button.setText("Продолжить")
+        else:
+            self.paused_time += time.monotonic() - self.pause_started
+            self.pause_started = None
+            self.is_paused = False
+            self.timer.start(100)
+            self.pause_button.setText("Пауза")
+            self.setFocus()
+
+    # переход к следующей тренировке
+    def next_training(self):
+        self.load_text(self.level)
+
     # сохранение результатов тренировки в базу данных
     def finish_training(self):
         self.timer.stop() # останавливаем таймер
-        elapsed_seconds = time.monotonic() - self.start_time # вычисляем, сколько секунд длилась тренировка
+        elapsed_seconds = time.monotonic() - self.start_time - self.paused_time # вычисляем, сколько секунд длилась тренировка
         self.elapsed_time = int(elapsed_seconds) # сохраняем время тренировки в целых секундах
 
         # рассчитываем итоговую скорость печати
@@ -257,8 +308,8 @@ class MainWindow(QMainWindow):
 
         seconds = self.elapsed_time % 60 # сколько секунд осталось после выделения минут
 
-        self.time_label.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
-        self.speed_label.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
+        self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
+        self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
 
         connection = sqlite3.connect("typing_trainer.db")
         cursor = connection.cursor()
@@ -277,6 +328,9 @@ class MainWindow(QMainWindow):
         connection.close()  # закрываем соединение с базой данных
 
         self.update_graph() # обновляем график
+
+        self.next_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
 
 
     def initUI(self):
@@ -327,8 +381,23 @@ class MainWindow(QMainWindow):
         # ЛЕВАЯ ПАНЕЛЬ — НАВИГАЦИЯ И СЛОЖНОСТЬ
         # ==================================================
 
+        self.pause_button = QPushButton("Пауза")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        stats_panel.layout().addWidget(self.pause_button)
+
+        self.next_button = QPushButton("Следующий текст")
+        self.next_button.clicked.connect(self.next_training)
+        stats_panel.layout().addWidget(self.next_button)
+
         # Название приложения
         title_label = QLabel("TypingTrainer")
+        title_label.setStyleSheet("""
+            font-size: 26px;
+            font-weight: bold;
+            color: #A77BFF;
+            padding: 15px 0px;
+        """)
         sidebar.layout().addWidget(title_label)
 
         # кнопка смены темы
@@ -342,8 +411,22 @@ class MainWindow(QMainWindow):
 
         self.button_theme.clicked.connect(self.toggle_theme)
 
+        language_label = QLabel("ЯЗЫК ТЕКСТА")
+        language_label.setObjectName("sectionTitle")
+        sidebar.layout().addWidget(language_label)
+
+        button_ru = QPushButton("Русский")
+        button_en = QPushButton("English")
+
+        sidebar.layout().addWidget(button_ru)
+        sidebar.layout().addWidget(button_en)
+
+        button_ru.clicked.connect(lambda: self.change_language("ru"))
+        button_en.clicked.connect(lambda: self.change_language("en"))
+
         # Выбор сложности
-        difficulty_label = QLabel("Сложность")
+        difficulty_label = QLabel("СЛОЖНОСТЬ")
+        difficulty_label.setObjectName("sectionTitle")
         sidebar.layout().addWidget(difficulty_label)
 
         button_light = QPushButton("Лёгкая")
@@ -364,24 +447,61 @@ class MainWindow(QMainWindow):
         # ==================================================
 
         # Текст для набора
-        self.text_label = QTextBrowser()
-        self.text_label.setReadOnly(True)
+        self.text_label = QLabel()
+        self.text_label.setTextFormat(Qt.TextFormat.RichText)
+        self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.text_label.setWordWrap(True)
         self.text_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        training_panel.layout().addWidget(self.text_label)
-
-        # Скорость печати
-        self.speed_label = QLabel("Скорость: 0 симв./мин")
-        stats_panel.layout().addWidget(self.speed_label)
+        training_panel.layout().addWidget(self.text_label, 1)
 
         # ==================================================
         # ПРАВАЯ ПАНЕЛЬ — СТАТИСТИКА
         # ==================================================
 
-        self.accuracy_label = QLabel("Точность: 100,0%")
-        stats_panel.layout().addWidget(self.accuracy_label)
+        self.text_size_label = QLabel(f"РАЗМЕР ТЕКСТА {self.text_font_size}")
+        self.text_size_label.setObjectName("sectionTitle")
+        stats_panel.layout().addWidget(self.text_size_label)
 
-        self.time_label = QLabel("Время: 00:00")
-        stats_panel.layout().addWidget(self.time_label)
+        self.font_slider = QSlider(Qt.Orientation.Horizontal)
+        self.font_slider.setRange(12, 36)
+        self.font_slider.setValue(self.text_font_size)
+        stats_panel.layout().addWidget(self.font_slider)
+
+        self.font_slider.valueChanged.connect(self.change_font_size)
+
+        # Скорость печати, точность и время
+        self.speed_value = QLabel("0")
+        self.accuracy_value = QLabel("100,0%")
+        self.time_value = QLabel("00:00")
+
+        self.speed_title = QLabel("СКОРОСТЬ")
+        self.accuracy_title = QLabel("ТОЧНОСТЬ")
+        self.time_title = QLabel("ВРЕМЯ")
+
+        for title in (self.speed_title, self.accuracy_title, self.time_title):
+            title.setObjectName("statTitle")
+
+        for value in (self.speed_value, self.accuracy_value, self.time_value):
+            value.setObjectName("statValue")
+
+        for title, value in (
+            (self.speed_title, self.speed_value),
+            (self.accuracy_title, self.accuracy_value),
+            (self.time_title, self.time_value)
+        ):
+            card = QWidget()
+            card.setObjectName("statCard")
+
+            card_layout = QVBoxLayout()
+            card_layout.setContentsMargins(14, 10, 14, 10)
+            card_layout.setSpacing(4)
+
+            card.setLayout(card_layout)
+
+            card_layout.addWidget(title)
+            card_layout.addWidget(value)
+
+            stats_panel.layout().addWidget(card)
 
         # блок для графика
         self.figure = Figure()
