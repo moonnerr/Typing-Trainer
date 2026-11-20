@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt, QTimer
 import time
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MaxNLocator, StrMethodFormatter
 from pathlib import Path
 from styles import LIGHT_THEME, DARK_THEME, get_stylesheet
 
@@ -33,11 +33,11 @@ class MainWindow(QMainWindow):
         self.pause_started = None
         self.paused_time = 0
 
+        self.pending_result = None
+
         self.settings = self.load_settings()
 
-        self.current_theme = (
-            LIGHT_THEME if self.settings["theme"] == "light" else DARK_THEME
-        )
+        self.current_theme = (LIGHT_THEME if self.settings["theme"] == "light" else DARK_THEME)
 
         self.text_font_size = self.settings["font_size"]
 
@@ -45,28 +45,61 @@ class MainWindow(QMainWindow):
 
     # сохранение пользовательских настроек
     def load_settings(self):
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
+        connection = None
 
-        cursor.execute("SELECT theme, font_size, interface_language, training_language FROM settings WHERE id = 1")
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
 
-        result = cursor.fetchone()
-        connection.close()
+            cursor.execute("SELECT theme, font_size, interface_language, training_language FROM settings WHERE id = 1") # получение настроек
 
-        if result is None:
-            return {"theme": "light", "font_size": 20, "interface_language": "ru", "training_language": "ru"}
+            result = cursor.fetchone()
 
-        return {"theme": result[0], "font_size": result[1], "interface_language": result[2], "training_language": result[3]}
+            if result is None:
+                return {"theme": "light", "font_size": 20, "interface_language": "ru", "training_language": "ru"}
+
+            theme, font_size, interface_language, training_language = result
+
+            if theme not in ("light", "dark"):
+                theme = "light"
+
+            if not isinstance(font_size, int) or not 12 <= font_size <= 36:
+                font_size = 20
+
+            if interface_language not in ("ru", "en"):
+                interface_language = "ru"
+
+            if training_language not in ("ru", "en"):
+                training_language = "ru"
+
+            return {
+                "theme": theme,
+                "font_size": font_size,
+                "interface_language": interface_language,
+                "training_language": training_language
+            }
+
+        except sqlite3.Error as error:
+            QMessageBox.critical(
+                None,
+                "Ошибка базы данных",
+                f"Не удалось загрузить настройки.\n\n{error}"
+            )
+            sys.exit(1)
+
+        finally:
+            if connection is not None:
+                connection.close()
 
     # загрузка нового текста для тренировки и подготовка программы к его набору
     def load_text(self, level):
         self.level = level  # запоминаем текущую сложность
-        self.timer.stop() # останавливаем таймер
-        self.start_time = None # новая тренировка ещё не началась
-        self.elapsed_time = 0 # обнуляет прошедшее время
-        self.time_value.setText("00:00") # обновляет надпись времени на экране
-        self.accuracy_value.setText("100,0%") # обновляет надпись точности на экране
-        self.speed_value.setText("0") # обновляет надпись времени на экране
+        self.timer.stop()  # останавливаем таймер
+        self.start_time = None  # новая тренировка ещё не началась
+        self.elapsed_time = 0  # обнуляет прошедшее время
+        self.time_value.setText("00:00")  # обновляет надпись времени на экране
+        self.accuracy_value.setText("100,0%")  # обновляет надпись точности на экране
+        self.speed_value.setText("0")  # обновляет надпись времени на экране
 
         self.is_paused = False
         self.pause_started = None
@@ -76,43 +109,139 @@ class MainWindow(QMainWindow):
         self.next_button.setEnabled(False)
 
         self.cpm = 0
+        self.result = ""
 
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
+        connection = None
 
-        cursor.execute("SELECT content FROM texts WHERE level = ? AND language = ? ORDER BY RANDOM() LIMIT 1", (level, self.settings["training_language"])) # выбираем рандомный текст из базы данных по языку и уровню
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
 
-        result = cursor.fetchone()
-        connection.close()
+            cursor.execute("SELECT content FROM texts WHERE level = ? AND language = ? ORDER BY RANDOM() LIMIT 1",
+                           (level, self.settings[
+                               "training_language"]))  # выбираем рандомный текст из базы данных по языку и уровню
+
+            result = cursor.fetchone()
+
+        except sqlite3.Error as error:
+            self.text_label.setText("Не удалось загрузить текст")
+            QMessageBox.critical(
+                self,
+                "Ошибка базы данных",
+                f"Не удалось загрузить текст для тренировки.\n\n{error}"
+            )
+            return
+
+        finally:
+            if connection is not None:
+                connection.close()
 
         if result is None:
-            self.result = ""
             self.text_label.setText("Нет текстов для выбранного языка и сложности")
             QMessageBox.warning(self, "Нет текстов", "Нет текстов для выбранного языка и сложности.")
             return
 
         self.accuracy = 100.0  # точность печати на старте
-        self.errors = 0 # количество ошибок
-        self.result = result[0] # строка, которую нужно напечатать
-        self.current_index = 0 # текущий номер символа
+        self.errors = 0  # количество ошибок
+        self.result = result[0]  # строка, которую нужно напечатать
+        self.current_index = 0  # текущий номер символа
         self.last_input_correct = None
         self.update_text()
 
-        self.setFocus() # переключаем клавиатурный фокус на главное окно
+        self.setFocus()  # переключаем клавиатурный фокус на главное окно
 
     # смена языка тренировочного текста и сохранение выбранного языка в базе данных
     def change_language(self, language):
-        self.settings["training_language"] = language
+        connection = None
 
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
 
-        cursor.execute("UPDATE settings SET training_language = ? WHERE id = 1", (language,))
+            cursor.execute("UPDATE settings SET training_language = ? WHERE id = 1", (language,))
 
-        connection.commit()
-        connection.close()
+            connection.commit()
 
-        self.load_text(self.level) # передаём сложность текста
+            self.settings["training_language"] = language
+            self.load_text(self.level)
+
+        except sqlite3.Error as error:
+            QMessageBox.critical(
+                self,
+                "Ошибка базы данных",
+                f"Не удалось изменить язык тренировочного текста.\n\n{error}"
+            )
+
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def change_interface_language(self, language):
+        self.settings["interface_language"] = language
+
+        connection = None
+
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
+
+            cursor.execute(
+                "UPDATE settings SET interface_language = ? WHERE id = 1",
+                (language,)
+            )
+
+            connection.commit()
+
+        except sqlite3.Error as error:
+            QMessageBox.critical(
+                self,
+                "Database error" if language == "en" else "Ошибка базы данных",
+                f"Failed to change interface language.\n\n{error}" if language == "en"
+                else f"Не удалось изменить язык интерфейса.\n\n{error}"
+            )
+            return
+
+        finally:
+            if connection is not None:
+                connection.close()
+
+        if language == "ru":
+            self.pause_button.setText("Пауза")
+            self.language_label.setText("ЯЗЫК ТЕКСТА")
+            self.difficulty_label.setText("СЛОЖНОСТЬ")
+            self.button_light.setText("Лёгкая")
+            self.button_medium.setText("Средняя")
+            self.button_hard.setText("Сложная")
+            self.next_button.setText("Следующий текст")
+            self.retry_button.setText("Повторить сохранение")
+            self.button_theme.setText("Светлая тема" if self.settings["theme"] == "dark" else "Тёмная тема")
+            self.text_size_label.setText(f"РАЗМЕР ТЕКСТА {self.text_font_size}")
+            self.speed_title.setText("СКОРОСТЬ")
+            self.accuracy_title.setText("ТОЧНОСТЬ")
+            self.time_title.setText("ВРЕМЯ")
+            self.ax.set_title("Мой прогресс")
+            self.ax.set_xlabel("Тренировки")
+            self.ax.set_ylabel("Скорость (симв./мин)")
+
+        else:
+            self.pause_button.setText("Pause")
+            self.language_label.setText("TEXT LANGUAGE")
+            self.difficulty_label.setText("DIFFICULTY")
+            self.button_light.setText("Easy")
+            self.button_medium.setText("Medium")
+            self.button_hard.setText("Hard")
+            self.next_button.setText("Next text")
+            self.retry_button.setText("Retry saving")
+            self.button_theme.setText("Light theme" if self.settings["theme"] == "dark" else "Dark theme")
+            self.text_size_label.setText(f"TEXT SIZE {self.text_font_size}")
+            self.speed_title.setText("SPEED")
+            self.accuracy_title.setText("ACCURACY")
+            self.time_title.setText("TIME")
+            self.ax.set_title("My progress")
+            self.ax.set_xlabel("Trainings")
+            self.ax.set_ylabel("Speed (chars/min)")
+
+        self.canvas.draw()
 
     # проверка правильности ввода
     def keyPressEvent(self, event):
@@ -152,7 +281,16 @@ class MainWindow(QMainWindow):
     # изменение размера тренировочного текста на экране
     def change_font_size(self, size):
         self.text_font_size = size
-        self.text_size_label.setText(f"РАЗМЕР ТЕКСТА {size}")
+
+        connection = sqlite3.connect(DB_PATH)
+        cursor = connection.cursor()
+
+        cursor.execute("UPDATE settings SET font_size = ? WHERE id = 1",(size,))
+
+        connection.commit()
+        connection.close()
+
+        self.text_size_label.setText(f"РАЗМЕР ТЕКСТА {size}" if self.settings["interface_language"] == "ru" else f"TEXT SIZE {size}")
         self.text_label.setStyleSheet(f"font-size: {size}px;")
 
     # смена цвета символа
@@ -197,20 +335,42 @@ class MainWindow(QMainWindow):
         minutes = self.elapsed_time // 60 # сколько минут прошло
         seconds = self.elapsed_time % 60 # сколько секунд осталось после выделения минут
 
-        self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
-        self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
+        # меняем отображаемые данные по времени и скорости печати
+        if self.settings["interface_language"] == "ru":
+            self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}")
+            self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин")
+        else:
+            self.time_value.setText(f"Time: {minutes:02d}:{seconds:02d}")
+            self.speed_value.setText(f"Speed: {self.cpm:.0f} chars/min")
 
     # обновление графика прогресса
     def update_graph(self):
-        # Подключаемся к базе данных
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
+        connection = None
 
-        # Получаем номер тренировки и скорость печати
-        cursor.execute("""SELECT training_number, speed FROM results ORDER BY training_number""")
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
 
-        results = cursor.fetchall()
-        connection.close()
+            # Получаем номер тренировки и скорость печати
+            cursor.execute("""SELECT training_number, speed FROM results ORDER BY training_number""")
+
+            results = cursor.fetchall()
+
+        except sqlite3.Error as error:
+            self.ax.clear()
+            self.ax.set_title("Не удалось загрузить статистику")
+            self.canvas.draw()
+
+            QMessageBox.warning(
+                self,
+                "Ошибка базы данных",
+                f"Не удалось загрузить статистику.\n\n{error}"
+            )
+            return
+
+        finally:
+            if connection is not None:
+                connection.close()
 
         # Разделяем данные на два списка
         trainings = [row[0] for row in results]
@@ -234,10 +394,19 @@ class MainWindow(QMainWindow):
             markersize=5 # толщина точки
         )
 
-        self.ax.set_title("Мой прогресс", color=theme["text"])
-        self.ax.set_xlabel("Тренировки", color=theme["secondary_text"])
+        if self.settings["interface_language"] == "ru":
+            self.ax.set_title("Мой прогресс", color=theme["text"])
+            self.ax.set_xlabel("Тренировки", color=theme["secondary_text"])
+            self.ax.set_ylabel("Скорость (симв./мин)", color=theme["secondary_text"])
+        else:
+            self.ax.set_title("My progress", color=theme["text"])
+            self.ax.set_xlabel("Trainings", color=theme["secondary_text"])
+            self.ax.set_ylabel("Speed (chars/min)", color=theme["secondary_text"])
+
         self.ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        self.ax.set_ylabel("Скорость (симв./мин)", color=theme["secondary_text"])
+        self.ax.yaxis.set_major_locator(MaxNLocator(nbins=5, min_n_ticks=3))
+        self.ax.yaxis.set_major_formatter(StrMethodFormatter('{x:.0f}'))
+        self.ax.set_ylim(bottom=0)
 
         self.ax.tick_params(colors=theme["secondary_text"])
         self.ax.grid(color=theme["panel_border"], linestyle="--", alpha=0.8)
@@ -252,46 +421,63 @@ class MainWindow(QMainWindow):
 
     # переключение оформления программы между светлой и тёмной темами
     def toggle_theme(self):
-        # Переключаем тему
-        if self.settings["theme"] == "light":
-            self.settings["theme"] = "dark"
-            self.current_theme = DARK_THEME
-            self.button_theme.setText("Светлая тема")
-        else:
-            self.settings["theme"] = "light"
-            self.current_theme = LIGHT_THEME
-            self.button_theme.setText("Тёмная тема")
+        new_theme = "dark" if self.settings["theme"] == "light" else "light"
 
-        # Применяем новое оформление
+        connection = None
+
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
+
+            cursor.execute("UPDATE settings SET theme = ? WHERE id = 1", (new_theme,))
+
+            connection.commit()
+
+        except sqlite3.Error as error:
+            QMessageBox.critical(
+                self,
+                "Ошибка базы данных",
+                f"Не удалось сохранить тему оформления.\n\n{error}"
+            )
+            return
+
+        finally:
+            if connection is not None:
+                connection.close()
+
+        self.settings["theme"] = new_theme
+
+        if new_theme == "dark":
+            self.current_theme = DARK_THEME
+            self.button_theme.setText(
+                "Светлая тема" if self.settings["interface_language"] == "ru" else "Light theme"
+            )
+        else:
+            self.current_theme = LIGHT_THEME
+            self.button_theme.setText(
+                "Тёмная тема" if self.settings["interface_language"] == "ru" else "Dark theme"
+            )
+
         self.setStyleSheet(get_stylesheet(self.current_theme))
 
-        # Сохраняем выбранную тему в базе данных
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
-
-        cursor.execute("UPDATE settings SET theme = ? WHERE id = 1", (self.settings["theme"],))
-
-        connection.commit()
-        connection.close()
-
-        # Обновляем график
         self.update_graph()
-        # обновляем текст
         self.update_text()
 
-    # приостановку тренировки и её продолжение
+    # приостановка тренировки и её продолжение
     def toggle_pause(self):
+        language = self.settings["interface_language"]
+
         if not self.is_paused:
             self.is_paused = True
             self.pause_started = time.monotonic()
             self.timer.stop()
-            self.pause_button.setText("Продолжить")
+            self.pause_button.setText("Продолжить" if language == "ru" else "Resume")
         else:
             self.paused_time += time.monotonic() - self.pause_started
             self.pause_started = None
             self.is_paused = False
             self.timer.start(100)
-            self.pause_button.setText("Пауза")
+            self.pause_button.setText("Пауза" if language == "ru" else "Pause")
             self.setFocus()
 
     # переход к следующей тренировке
@@ -313,29 +499,73 @@ class MainWindow(QMainWindow):
 
         seconds = self.elapsed_time % 60 # сколько секунд осталось после выделения минут
 
-        self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}") # меняем отображаемые данные по времени
-        self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин") # меняем отображаемые данные по скорости печати
-
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
-
-        cursor.execute("SELECT MAX(training_number) FROM results")
-        last_number = cursor.fetchone()[0]
-
-        if last_number is None:
-            training_number = 1
+        # меняем отображаемые данные по времени и скорости печати
+        if self.settings["interface_language"] == "ru":
+            self.time_value.setText(f"Время: {minutes:02d}:{seconds:02d}")
+            self.speed_value.setText(f"Скорость: {self.cpm:.0f} симв./мин")
         else:
-            training_number = last_number + 1
+            self.time_value.setText(f"Time: {minutes:02d}:{seconds:02d}")
+            self.speed_value.setText(f"Speed: {self.cpm:.0f} chars/min")
 
-        cursor.execute("""INSERT INTO results (speed, accuracy, errors, duration, level, training_number) VALUES (?, ?, ?, ?, ?, ?)""",(self.cpm, self.accuracy, self.errors, self.elapsed_time, self.level, training_number))
+        self.pending_result = (
+            self.cpm,
+            self.accuracy,
+            self.errors,
+            self.elapsed_time,
+            self.level
+        )
 
-        connection.commit()  # подтверждаем и сохраняем изменения в базе данных
-        connection.close()  # закрываем соединение с базой данных
+        self.save_result()
 
-        self.update_graph() # обновляем график
-
-        self.next_button.setEnabled(True)
         self.pause_button.setEnabled(False)
+
+        self.pause_button.setText("Пауза" if self.settings["interface_language"] == "ru" else "Pause")
+
+    # сохранение результата тренировки
+    def save_result(self):
+        connection = None
+
+        try:
+            connection = sqlite3.connect(DB_PATH)
+            cursor = connection.cursor()
+
+            cursor.execute("SELECT MAX(training_number) FROM results")
+            last_number = cursor.fetchone()[0]
+
+            if last_number is None:
+                training_number = 1
+            else:
+                training_number = last_number + 1
+
+            cursor.execute(
+                """INSERT INTO results (speed, accuracy, errors, duration, level, training_number) VALUES (?, ?, ?, ?, ?, ?)""",
+                (*self.pending_result, training_number)
+            )
+
+            connection.commit()
+
+            self.pending_result = None
+            self.retry_button.setEnabled(False)
+            self.next_button.setEnabled(True)
+            self.update_graph()
+
+        except sqlite3.Error as error:
+            QMessageBox.warning(
+                self,
+                "Ошибка сохранения",
+                f"Не удалось сохранить результат тренировки.\n\n{error}\n\nРезультат остался в памяти. Попробуйте сохранить его повторно."
+            )
+
+            self.retry_button.setEnabled(True)
+
+        finally:
+            if connection is not None:
+                connection.close()
+
+    # повторное сохранение результата
+    def retry_save_result(self):
+        if self.pending_result is not None:
+            self.save_result()
 
 
     def initUI(self):
@@ -386,14 +616,25 @@ class MainWindow(QMainWindow):
         # ЛЕВАЯ ПАНЕЛЬ — НАВИГАЦИЯ И СЛОЖНОСТЬ
         # ==================================================
 
-        self.pause_button = QPushButton("Пауза")
-        self.pause_button.setEnabled(False)
-        self.pause_button.clicked.connect(self.toggle_pause)
-        stats_panel.layout().addWidget(self.pause_button)
+        interface_buttons_layout = QHBoxLayout()
 
-        self.next_button = QPushButton("Следующий текст")
-        self.next_button.clicked.connect(self.next_training)
-        stats_panel.layout().addWidget(self.next_button)
+        self.interface_button_en = QPushButton("EN")
+        self.interface_button_ru = QPushButton("RU")
+
+        self.interface_button_en.setFixedSize(65, 40)
+        self.interface_button_ru.setFixedSize(65, 40)
+
+        self.interface_button_en.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.interface_button_ru.setStyleSheet("font-size: 16px; font-weight: bold;")
+
+        interface_buttons_layout.addWidget(self.interface_button_en)
+        interface_buttons_layout.addWidget(self.interface_button_ru)
+        interface_buttons_layout.addStretch()
+
+        sidebar.layout().addLayout(interface_buttons_layout)
+
+        self.interface_button_en.clicked.connect(lambda: self.change_interface_language("en"))
+        self.interface_button_ru.clicked.connect(lambda: self.change_interface_language("ru"))
 
         # Название приложения
         title_label = QLabel("TypingTrainer")
@@ -407,6 +648,7 @@ class MainWindow(QMainWindow):
 
         # кнопка смены темы
         self.button_theme = QPushButton()
+        self.button_theme.setFocusPolicy(Qt.FocusPolicy.NoFocus) # запрещаем кнопке получать фокус клавиатуры
         sidebar.layout().addWidget(self.button_theme)
 
         if self.settings["theme"] == "dark":
@@ -416,9 +658,9 @@ class MainWindow(QMainWindow):
 
         self.button_theme.clicked.connect(self.toggle_theme)
 
-        language_label = QLabel("ЯЗЫК ТЕКСТА")
-        language_label.setObjectName("sectionTitle")
-        sidebar.layout().addWidget(language_label)
+        self.language_label = QLabel("ЯЗЫК ТЕКСТА")
+        self.language_label.setObjectName("sectionTitle")
+        sidebar.layout().addWidget(self.language_label)
 
         button_ru = QPushButton("Русский")
         button_en = QPushButton("English")
@@ -430,23 +672,21 @@ class MainWindow(QMainWindow):
         button_en.clicked.connect(lambda: self.change_language("en"))
 
         # Выбор сложности
-        difficulty_label = QLabel("СЛОЖНОСТЬ")
-        difficulty_label.setObjectName("sectionTitle")
-        sidebar.layout().addWidget(difficulty_label)
+        self.difficulty_label = QLabel("СЛОЖНОСТЬ")
+        self.difficulty_label.setObjectName("sectionTitle")
+        sidebar.layout().addWidget(self.difficulty_label)
 
-        button_light = QPushButton("Лёгкая")
-        button_medium = QPushButton("Средняя")
-        button_hard = QPushButton("Сложная")
+        self.button_light = QPushButton("Лёгкая")
+        self.button_medium = QPushButton("Средняя")
+        self.button_hard = QPushButton("Сложная")
 
-        sidebar.layout().addWidget(button_light)
-        sidebar.layout().addWidget(button_medium)
-        sidebar.layout().addWidget(button_hard)
+        sidebar.layout().addWidget(self.button_light)
+        sidebar.layout().addWidget(self.button_medium)
+        sidebar.layout().addWidget(self.button_hard)
 
-        # Подключение кнопок к выбору сложности
-        button_light.clicked.connect(lambda: self.load_text("light"))
-        button_medium.clicked.connect(lambda: self.load_text("medium"))
-        button_hard.clicked.connect(lambda: self.load_text("hard"))
-
+        self.button_light.clicked.connect(lambda: self.load_text("light"))
+        self.button_medium.clicked.connect(lambda: self.load_text("medium"))
+        self.button_hard.clicked.connect(lambda: self.load_text("hard"))
         # ==================================================
         # СРЕДНЯЯ ПАНЕЛЬ — ТРЕНИРОВКА
         # ==================================================
@@ -458,10 +698,26 @@ class MainWindow(QMainWindow):
         self.text_label.setWordWrap(True)
         self.text_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         training_panel.layout().addWidget(self.text_label, 1)
+        self.text_label.setStyleSheet(f"font-size: {self.text_font_size}px;")
 
         # ==================================================
         # ПРАВАЯ ПАНЕЛЬ — СТАТИСТИКА
         # ==================================================
+
+        self.pause_button = QPushButton("Пауза")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        stats_panel.layout().addWidget(self.pause_button)
+
+        self.next_button = QPushButton("Следующий текст")
+        self.next_button.setEnabled(False)
+        self.next_button.clicked.connect(self.next_training)
+        stats_panel.layout().addWidget(self.next_button)
+
+        self.retry_button = QPushButton("Повторить сохранение")
+        self.retry_button.clicked.connect(self.retry_save_result)
+        self.retry_button.setEnabled(False)
+        stats_panel.layout().addWidget(self.retry_button)
 
         self.text_size_label = QLabel(f"РАЗМЕР ТЕКСТА {self.text_font_size}")
         self.text_size_label.setObjectName("sectionTitle")
@@ -521,6 +777,7 @@ class MainWindow(QMainWindow):
 
         self.load_text("light")
 
+        self.change_interface_language(self.settings["interface_language"])
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
